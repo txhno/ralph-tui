@@ -510,7 +510,7 @@ export class ClaudeAgentPlugin extends BaseAgentPlugin {
         oversizedRecord = undefined;
         const diagnostic = `${this.meta.name} JSONL record exceeded the ${MAX_PENDING_JSONL_CHARS}-character buffer limit; discarding payload.`;
         const failure = error ?? this.getClaudeErrorMessage(metadata) ?? (
-          !['assistant', 'user', 'system'].includes(String(metadata.type)) ||
+          !['assistant', 'user', 'system', 'tool_progress', 'rate_limit_event'].includes(String(metadata.type)) ||
           metadata.is_error === true ||
           (typeof metadata.subtype === 'string' && metadata.subtype.startsWith('error'))
             ? 'Unsupported oversized record metadata' : undefined
@@ -522,9 +522,9 @@ export class ClaudeAgentPlugin extends BaseAgentPlugin {
         }
         return [{ type: 'text', content: `${diagnostic} Validated non-terminal record.\n` }];
       }
-      const line = pendingOutput;
+      const line = pendingOutput.trim();
       pendingOutput = '';
-      if (!line.trim()) return [];
+      if (!line) return [];
       try {
         const rawJson = JSON.parse(line) as Record<string, unknown>;
         if (rawJson && typeof rawJson === 'object') {
