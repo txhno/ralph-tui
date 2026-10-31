@@ -7,6 +7,7 @@
 
 import { spawn } from 'node:child_process';
 import { BaseAgentPlugin, findCommandPath, quoteForWindowsShell } from '../base.js';
+import { ClaudeJsonRecord } from '../claude-json-record.js';
 import {
   extractAgentTextFromJsonl,
   processAgentEvents,
@@ -491,8 +492,62 @@ export class ClaudeAgentPlugin extends BaseAgentPlugin {
     }
 
     let pendingOutput = '';
-    let discardingRecord = false;
+    let oversizedRecord: ClaudeJsonRecord | undefined;
     let executionError: string | undefined;
+    const appendRecord = (data: string): void => {
+      if (!oversizedRecord && pendingOutput.length + data.length > MAX_PENDING_JSONL_CHARS) {
+        oversizedRecord = new ClaudeJsonRecord();
+        oversizedRecord.write(pendingOutput);
+        pendingOutput = '';
+      }
+      if (oversizedRecord) oversizedRecord.write(data);
+      else pendingOutput += data;
+    };
+    const finishRecord = (): AgentDisplayEvent[] => {
+      if (oversizedRecord) {
+        // Never send partial records to raw-message observers or assemble discarded payloads.
+        const { metadata, error } = oversizedRecord.finish();
+        oversizedRecord = undefined;
+        const diagnostic = `${this.meta.name} JSONL record exceeded the ${MAX_PENDING_JSONL_CHARS}-character buffer limit; discarding payload.`;
+        const failure = error ?? this.getClaudeErrorMessage(metadata) ?? (
+          !['assistant', 'user', 'system'].includes(String(metadata.type)) ||
+          metadata.is_error === true ||
+          (typeof metadata.subtype === 'string' && metadata.subtype.startsWith('error'))
+            ? 'Unsupported oversized record metadata' : undefined
+        );
+        if (failure) {
+          const message = `${diagnostic} ${failure}`;
+          executionError ??= message;
+          return [{ type: 'error', message }];
+        }
+        return [{ type: 'text', content: `${diagnostic} Validated non-terminal record.\n` }];
+      }
+      const line = pendingOutput;
+      pendingOutput = '';
+      if (!line.trim()) return [];
+      try {
+        const rawJson = JSON.parse(line) as Record<string, unknown>;
+        if (rawJson && typeof rawJson === 'object') {
+          if (rawJson.type === 'error' || rawJson.type === 'result') {
+            executionError ??= this.getClaudeErrorMessage(rawJson);
+          }
+          options?.onJsonlMessage?.(rawJson);
+        }
+      } catch {
+        // Not valid JSON or the observer threw; keep processing records.
+      }
+      return this.parseClaudeOutputToEvents(line);
+    };
+    const displayEvents = (events: AgentDisplayEvent[]): void => {
+      if (options?.onStdoutSegments) {
+        const segments = processAgentEventsToSegments(events);
+        if (segments.length) options.onStdoutSegments(segments);
+      }
+      if (options?.onStdout) {
+        const parsed = processAgentEvents(events);
+        if (parsed.length) options.onStdout(parsed);
+      }
+    };
     const parsedOptions: AgentExecuteOptions = {
       ...options,
       env: { ...sandboxEnv, ...options?.env },
@@ -505,72 +560,21 @@ export class ClaudeAgentPlugin extends BaseAgentPlugin {
       // Legacy string callback or wrapper that calls both callbacks and JSONL message callback
       onStdout: isStreamingJson
         ? (data: string) => {
-            if (discardingRecord) {
-              const delimiter = data.indexOf('\n');
-              if (delimiter < 0) return;
-              discardingRecord = false;
-              data = data.slice(delimiter + 1);
+            const events: AgentDisplayEvent[] = [];
+            let offset = 0;
+            let delimiter: number;
+            while ((delimiter = data.indexOf('\n', offset)) >= 0) {
+              appendRecord(data.slice(offset, delimiter));
+              events.push(...finishRecord());
+              offset = delimiter + 1;
             }
-            data = pendingOutput + data;
-            const boundary = data.lastIndexOf('\n');
-            pendingOutput = data.slice(boundary + 1);
-            let overflow: string | undefined;
-            if (pendingOutput.length > MAX_PENDING_JSONL_CHARS) {
-              pendingOutput = '';
-              discardingRecord = true;
-              overflow = `${this.meta.name} JSONL record exceeded the ${MAX_PENDING_JSONL_CHARS}-character buffer limit; discarding until the next newline.`;
-            }
-            data = data.slice(0, boundary + 1);
-            // Parse each line for JSONL messages and display events
-            for (const line of data.split('\n')) {
-              const trimmed = line.trim();
-              if (!trimmed) continue;
-
-              // Try to parse as JSON and call the raw JSONL message callback
-              try {
-                const rawJson = JSON.parse(trimmed) as Record<string, unknown>;
-                if (rawJson && typeof rawJson === 'object') {
-                  if (rawJson.type === 'error' || rawJson.type === 'result') {
-                    executionError ??= this.getClaudeErrorMessage(rawJson);
-                  }
-                  options?.onJsonlMessage?.(rawJson);
-                }
-              } catch {
-                // Not valid JSON or the observer threw; keep processing records.
-              }
-            }
-
-            // Also parse for display events
-            const events = this.parseClaudeOutputToEvents(data);
-            if (overflow) {
-              executionError ??= overflow;
-              events.push({ type: 'error', message: overflow });
-            }
-            if (events.length > 0) {
-              // Call TUI-native segments callback if provided
-              if (options?.onStdoutSegments) {
-                const segments = processAgentEventsToSegments(events);
-                if (segments.length > 0) {
-                  options.onStdoutSegments(segments);
-                }
-              }
-              // Also call legacy string callback if provided
-              if (options?.onStdout) {
-                const parsed = processAgentEvents(events);
-                if (parsed.length > 0) {
-                  options.onStdout(parsed);
-                }
-              }
-            }
+            appendRecord(data.slice(offset));
+            if (events.length) displayEvents(events);
           }
         : options?.onStdout,
       onEnd: (result) => {
         try {
-          if (!discardingRecord && pendingOutput.trim()) {
-            const tail = pendingOutput;
-            pendingOutput = '';
-            parsedOptions.onStdout?.(`${tail}\n`);
-          }
+          if (isStreamingJson) displayEvents(finishRecord());
         } finally {
           if (executionError && (result.status === 'completed' || result.status === 'failed')) {
             result.status = 'failed';

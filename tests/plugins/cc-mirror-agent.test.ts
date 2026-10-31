@@ -113,7 +113,7 @@ for (const [id, factory] of [['minimax', createMiniMaxAgent], ['zai', createZaiA
       expect(plugin.listModels!()).toEqual(['sonnet', 'opus', 'haiku']);
     });
 
-    test('delivers complete JSONL records before bounding an oversized pending line', async () => {
+    test('delivers bounded records around oversized lines even in a single stdout chunk', async () => {
       const plugin = factory();
       await plugin.initialize({});
       const messages: Record<string, unknown>[] = [];
@@ -129,7 +129,7 @@ for (const [id, factory] of [['minimax', createMiniMaxAgent], ['zai', createZaiA
       });
       try {
         await plugin.execute('test', undefined, { onStdout: (data) => { display += data; }, onJsonlMessage: (message) => { messages.push(message); } }).promise;
-        expect(messages.map((message) => message.type)).toEqual(['assistant', 'system', 'assistant']);
+        expect(messages.map((message) => message.type)).toEqual(['assistant', 'assistant']);
         expect(display).toContain('First record');
         expect(display).toContain('Last record');
       } finally {

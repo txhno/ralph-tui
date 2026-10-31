@@ -217,7 +217,7 @@ describe('ExecutionEngine', () => {
       { kind: 'tool_result', printMode: 'json', tracing: false, completed: false },
       { kind: 'thinking', printMode: 'text', tracing: true, completed: false },
       { kind: 'plain', printMode: 'text', tracing: false, completed: true },
-      { kind: 'adjacent', printMode: 'stream', tracing: false, completed: false },
+      { kind: 'adjacent', printMode: 'stream', tracing: false, completed: true },
       { kind: 'adjacent-valid', printMode: 'stream', tracing: false, completed: true },
       { kind: 'result-error', printMode: 'stream', tracing: true, completed: false },
       { kind: 'result-error-subtype', printMode: 'stream', tracing: true, completed: false },
@@ -291,9 +291,8 @@ describe('ExecutionEngine', () => {
         const result = await internals.runIteration(task);
 
         expect(exitCode).toBe(0);
-        expect(status).toBe(overflow || kind.startsWith('result-error') ? 'failed' : 'completed');
-        if (overflow) expect(error).toContain('buffer limit');
-        else if (kind.startsWith('result-error')) expect(error).toBe(marker);
+        expect(status).toBe(kind.startsWith('result-error') ? 'failed' : 'completed');
+        if (kind.startsWith('result-error')) expect(error).toBe(marker);
         else expect(error).toBeUndefined();
         expect(captured.length).toBe(Math.min(2_000_000, stdout.length + 1));
         expect(captured.startsWith('[...agent output truncated in memory...]\n')).toBe(stdout.length + 1 > 2_000_000);
